@@ -270,7 +270,69 @@ SocketIoEngine.prototype.step = function (requestSpec, ee) {
     });
   }
 
-  if(requestSpec.emit) {
+  function fConnect(context, callback) {
+    const socket = context.sockets[requestSpec.namespace || ''];
+    const query = requestSpec.connect.query;
+    if (_.isObject(query)) {
+      socket.io.opts.query = {};
+      for(const key in query) {
+        const val = query[key];
+        if (val === '__context._uid') {
+          socket.io.opts.query[key] = context._uid;
+          continue;
+        }
+        socket.io.opts.query[key] = template(val, context);
+      }
+    }
+    socket.connect(requestSpec.connect.target || socket.io.opts.target);
+    socket.once('connect', function() {
+      ee.emit('counter', `engine.socketio.connect`, 1);
+      callback(null, context);
+    });
+    socket.once('connect_error', function(err) {
+      ee.emit('error', err.message);
+      callback(err, null);
+    });
+
+    return
+  }
+
+  function fExpectLater(context, callback) {
+    const socketio = context.sockets[requestSpec.namespace || ''];
+    let startedAt = process.hrtime();
+    let response = {
+      data: template(requestSpec.expectLater.data, context),
+      capture: template(requestSpec.expectLater.capture, context),
+      match: template(requestSpec.expectLater.match, context)
+    };
+    let done = false;
+    socketio.on(requestSpec.expectLater.channel, function receive(data) {
+      done = true;
+      processResponse(ee, data, response, context, function(err) {
+        if (!err) {
+          ee.emit('counter', `engine.socketio.expectLater.${requestSpec.expectLater.channel}`, 1);
+          markEndTime(ee, context, startedAt);
+        }
+        // Stop listening on the response channel
+        socketio.off(requestSpec.expectLater.channel);
+      });
+      let waitTime = self.config.timeout || 10;
+      waitTime *= 1000;
+      setTimeout(function responseTimeout() {
+        if (!done) {
+          let err = 'response timeout';
+          ee.emit('error', err);
+        }
+      }, waitTime);
+    });
+    return callback(null, context);
+  }
+
+  if (requestSpec.connect) {
+    return fConnect;
+  } else if (requestSpec.expectLater) {
+    return fExpectLater;
+  } else if(requestSpec.emit) {
     return preStep;
   } else {
     return f;
@@ -296,6 +358,10 @@ SocketIoEngine.prototype.loadContextSocket = function(namespace, context, cb) {
 
     socket.onAny(() => context.__receivedMessageCount++);
 
+    if (options.autoConnect === false) {
+      return cb(null, socket);
+    }
+    
     socket.once('connect', function() {
       cb(null, socket);
     });
